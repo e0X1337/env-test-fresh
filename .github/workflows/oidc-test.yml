@@ -1,42 +1,26 @@
-name: OIDC Token Claims Test
-on:
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
-
+name: OIDC Claims Test
+on: workflow_dispatch
 permissions:
   id-token: write
   contents: read
-
 jobs:
   check-claims:
     runs-on: ubuntu-latest
     steps:
-      - name: Get OIDC token and inspect claims
+      - name: Get and decode OIDC token
         run: |
-          echo "=== Getting OIDC token ==="
           OIDC_TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://github.com/e0X1337" | python3 -c "
-import json,sys
-data = json.load(sys.stdin)
-print(data.get('value', 'ERROR: ' + str(data)))
-")
-          
-          echo "=== Decoding OIDC token claims ==="
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://github.com/e0X1337" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('value','ERROR'))")
+
+          echo "=== OIDC Token Claims ==="
           echo "$OIDC_TOKEN" | cut -d. -f2 | python3 -c "
 import json,sys,base64
 payload = sys.stdin.read().strip()
-# Add padding
 payload += '=' * (4 - len(payload) % 4)
 decoded = base64.urlsafe_b64decode(payload)
 claims = json.loads(decoded)
-print('Key claims:')
-for k in ['sub', 'ref', 'sha', 'repository', 'repository_id', 'repository_owner_id', 
-           'actor', 'event_name', 'ref_type', 'base_ref', 'head_ref',
-           'workflow', 'run_id', 'environment', 'runner_environment']:
-    if k in claims:
-        print(f'  {k}: {claims[k]}')
-print()
-print('Full claims:')
-print(json.dumps(claims, indent=2))
+for k in sorted(claims.keys()):
+    if k not in ('iat','exp','nbf','jti','iss','aud'):
+        print(f'{k}: {claims[k]}')
 "
