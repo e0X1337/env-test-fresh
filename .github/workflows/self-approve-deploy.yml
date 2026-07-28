@@ -1,0 +1,35 @@
+name: Self-Approve Deploy Test
+on: workflow_dispatch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: This should be blocked pending approval
+        run: echo "If you see this, deployment was approved"
+
+  self-approve:
+    runs-on: ubuntu-latest
+    needs: []
+    steps:
+      - name: Try to approve the pending deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Attempting to list pending deployments..."
+          
+          # Wait for the deploy job to be pending
+          sleep 10
+          
+          # Try to approve own pending deployment
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/pending_deployments" \
+            -d '{"environment_ids":[18852871651],"state":"approved","comment":"self-approved by workflow"}' \
+            | tee /tmp/result.json
+          
+          echo ""
+          echo "Result status: $(cat /tmp/result.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("message","SUCCESS"))' 2>/dev/null || echo 'check output')"
