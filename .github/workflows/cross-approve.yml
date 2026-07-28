@@ -1,0 +1,26 @@
+name: Cross-Run Approval Test
+on: push
+jobs:
+  attempt-cross-approve:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      deployments: write
+    steps:
+      - name: Try to approve run 30321000105 pending deployment
+        run: |
+          echo "=== Listing pending deployments for run 30321000105 ==="
+          LIST=$(curl -s \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/30321000105/pending_deployments")
+          echo "$LIST" | python3 -m json.tool 2>/dev/null || echo "$LIST"
+          
+          echo ""
+          echo "=== Attempting approval ==="
+          RESULT=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/30321000105/pending_deployments" \
+            -d '{"environment_ids":[18852871651],"state":"approved","comment":"cross-run GITHUB_TOKEN approval test"}')
+          echo "$RESULT"
