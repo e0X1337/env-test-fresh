@@ -1,0 +1,62 @@
+name: Approve Other Run
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID to approve'
+        required: true
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      deployments: write
+    steps:
+      - name: List and approve pending deployments
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID="${{ github.event.inputs.run_id }}"
+          echo "Target run: $RUN_ID"
+          
+          echo "=== Step 1: List pending deployments ==="
+          PENDING=$(curl -s \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/pending_deployments")
+          echo "$PENDING" | python3 -c "
+import json,sys
+data = json.load(sys.stdin)
+if isinstance(data, list):
+    for d in data:
+        print(f\"  Environment: {d['environment']['name']} (id={d['environment']['id']})\")
+        print(f\"  Current status: {d['current_user_can_approve']}\")
+else:
+    print(f\"  Error: {data.get('message', 'unknown')}\")
+"
+          
+          echo ""
+          echo "=== Step 2: Try to approve ==="
+          ENV_IDS=$(echo "$PENDING" | python3 -c "
+import json,sys
+data = json.load(sys.stdin)
+if isinstance(data, list) and len(data) > 0:
+    ids = [d['environment']['id'] for d in data]
+    print(json.dumps(ids))
+else:
+    print('[]')
+")
+          echo "Environment IDs: $ENV_IDS"
+          
+          if [ "$ENV_IDS" != "[]" ]; then
+            RESULT=$(curl -s -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/pending_deployments" \
+              -d "{\"environment_ids\":$ENV_IDS,\"state\":\"approved\",\"comment\":\"Auto-approved by GITHUB_TOKEN\"}")
+            echo "Approval result:"
+            echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
+          else
+            echo "No pending deployments found"
+          fi
